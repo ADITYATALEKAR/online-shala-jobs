@@ -1,0 +1,2 @@
+pymupdf==1.26.4
+truststore==0.10.1

@@ -1,0 +1,99 @@
+# Downloads NCERT textbooks from ncert.nic.in at run time, merges them and extracts text, one matrix job per book.
+# Results go ONLY to a private destination: a private repository given by secrets (default), or, if explicitly
+# chosen, a 1-day workflow artifact (artifacts of a public repository can be downloaded by anyone: off by default).
+# Nothing is ever committed to this public repository.
+name: ncert-books
+
+on:
+  workflow_dispatch:
+    inputs:
+      classes:
+        description: "Classes, e.g. 6 or 1-5 or 6,9-10 (empty = all)"
+        required: false
+        default: "6"
+      subjects:
+        description: "Subject slugs, e.g. sci,math,hin,san (empty = all)"
+        required: false
+        default: ""
+      books:
+        description: "Book ids, comma-separated (overrides the filters)"
+        required: false
+        default: ""
+      destination:
+        description: "Where results go"
+        type: choice
+        options: [private-repo, none, artifact-public-visible]
+        default: private-repo
+      include_pdf:
+        description: "Also push the merged PDF to the private repo (files over 95 MB are skipped)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ncert-books
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      books: ${{ steps.list.outputs.books }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: list
+        env:
+          CLASSES: ${{ inputs.classes }}
+          SUBJECTS: ${{ inputs.subjects }}
+          BOOKS: ${{ inputs.books }}
+        run: |
+          books=$(python ncert_fetch.py --list --classes "$CLASSES" --subjects "$SUBJECTS" --books "$BOOKS")
+          echo "selected: $books"
+          if [ "$books" = "[]" ]; then echo "::error::no books match the filters"; exit 1; fi
+          echo "books=$books" >> "$GITHUB_OUTPUT"
+
+  book:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # one book: ~5-20 min; far below the 6-hour job limit
+    strategy:
+      fail-fast: false
+      max-parallel: 3  # be gentle with ncert.nic.in
+      matrix:
+        book: ${{ fromJson(needs.plan.outputs.books) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Download and merge
+        run: python ncert_fetch.py --books "${{ matrix.book }}" --out work
+      - name: Extract text and chunks
+        run: python extract_chunks.py --work work --books "${{ matrix.book }}"
+
+      - name: Push results to the private repository
+        if: inputs.destination == 'private-repo'
+        env:
+          RESULTS_REPO: ${{ secrets.RESULTS_REPO }}    # owner/name of a PRIVATE repository
+          RESULTS_TOKEN: ${{ secrets.RESULTS_TOKEN }}  # fine-grained token: contents read/write on that repo only
+          INCLUDE_PDF: ${{ inputs.include_pdf }}
+        run: bash scripts/push_private.sh "work/${{ matrix.book }}"
+
+      - name: Upload artifact (PUBLIC-VISIBLE, 1 day)
+        if: inputs.destination == 'artifact-public-visible'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.book }}
+          path: |
+            work/${{ matrix.book }}/chapters.json
+            work/${{ matrix.book }}/pages.jsonl
+            work/${{ matrix.book }}/chunks.jsonl
+          retention-days: 1
+          if-no-files-found: error

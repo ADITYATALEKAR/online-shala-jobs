@@ -1,0 +1,6 @@
+work/
+*.pdf
+*.jpg
+*.jsonl
+__pycache__/
+.env
